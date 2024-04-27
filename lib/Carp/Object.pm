@@ -1,47 +1,28 @@
-=begin TODO
-
- - functional API to simulate Carp;
-      - global options in "our @CARP_OBJECT_ARGS;
-      - THINK : common @CARP_OBJECT_ARGS for all importing modules ?
-      - renaming symbols through Sub::Exporter or Exporter::Tiny
-
-  - use Carp::Object qw/:std/; ==> default export carp, croak and confess
-
-    use Carp::Object qw/:std verbose/, -args => {frame_filter => ...}
-      :carp  # carp croak confess
-      :all   # carp croak confess cluck
-
-      -all => {prefix => 'co_'}
-
-
-    package DBIx::DataModel::Carp;
-    use Carp::Object -re_export => qw/carp croak confess/;
-    our %CARP_OBJECT_ARGS = ();
-    sub im
-
-
-=end TODO
-
-=cut
-
-
-
 package Carp::Object;
+use 5.10.0;
 use utf8;
 use strict;
 use warnings;
 use Devel::StackTrace;
+use Module::Load;
+
+our $VERSION = 1.01;
+
+my %export_groups = (carp => [qw/carp croak confess/],
+                     all  => [qw/carp croak confess cluck/],  );
 
 # ======================================================================
 # METHODS
 # ======================================================================
-
 
 sub new {
   my ($class, %args) = @_;
   
   # create $self, consume the 'verbose' arg
   my $self = {verbose => delete $args{verbose}};
+
+  # class for stack traces
+  my $stacktrace_class = delete $args{stacktrace_class} // 'Devel::StackTrace';
 
   # compute a frame filter sub from the 'clan' argument -- see L<Devel::StackFrame/frame_filter>
   if (my $clan = delete $args{clan}) {
@@ -52,7 +33,7 @@ sub new {
   }
 
   # default handler for displaying frames
-  $self->{display_frame}       = delete $args{display_frame} // \&default_display_frame;
+  $self->{display_frame}       = delete $args{display_frame} // \&_default_display_frame;
   $self->{display_frame_param} = delete $args{display_frame_param};
 
   # classes to be ignored by Devel::StackTrace : list supplied by caller + current class
@@ -64,19 +45,17 @@ sub new {
   # create a Devel::StackTrace instance from remaining args (with defaults)
   $args{message} //= ''; # to avoid the 'Trace begun' string from StackFrame::Frame::as_string
   $args{indent}  //= 1;
-  $self->{trace} = Devel::StackTrace->new(%args);
+  load $stacktrace_class;
+  $self->{trace} = $stacktrace_class->new(%args);
 
   # return the carper object
   bless $self, $class;
 }
 
-
-
 sub croak   {my $self = shift; die  $self->msg(join("", @_), 1)} # 1 means "just one frame"
 sub carp    {my $self = shift; warn $self->msg(join("", @_), 1)} # idem
-sub confess {my $self = shift; die  $self->msg(join("", @_)   )}
-sub cluck   {my $self = shift; warn $self->msg(join("", @_)   )}
-
+sub confess {my $self = shift; die  $self->msg(join("", @_)   )} # no second arg means "the whole stack"
+sub cluck   {my $self = shift; warn $self->msg(join("", @_)   )} # idem
 
 sub msg {
   my ($self, $errstr, $n_frames) = @_;
@@ -85,8 +64,12 @@ sub msg {
   # get stack frames. If not doing a "confess", just keep the required number of frames.
   my  @frames = $self->{trace}->frames;
   no warnings 'once';       # because of $Carp::* below
-  splice @frames, $n_frames if defined $n_frames and not $self->{verbose} || $Carp::Verbose || $Carp::Clan::Verbose;
-
+  my $want_full_stack = ! defined $n_frames
+                        || $self->{verbose} || $Carp::Verbose || $Carp::Clan::Verbose;
+  if (!$want_full_stack) {
+    shift @frames if @frames > 1 && $frames[0]->package ne 'main';
+    splice @frames, $n_frames;
+  }
 
   # add frame descriptions to the original $errstr
   if (my $first_frame = shift @frames) {
@@ -102,7 +85,7 @@ sub msg {
 # SUBROUTINES (NOT METHODS)
 # ======================================================================
 
-sub default_display_frame {
+sub _default_display_frame {
   my ($frame, @other_args) = @_;
 
   # let Devel::StackTrace::Frame compute a string representation
@@ -120,38 +103,134 @@ sub default_display_frame {
                 '                # end of fist arg -- capture in $4
                 (?: ,\h* )?      # possibly followed by a comma
             }
-           {$1$4->$3(}x;               
+           {$1$4->$3(}x;         # rewrite as a method call          
 
   return "$str\n";
 }
   
-
 
 # ======================================================================
 # IMPORT API (CLASS METHOD)
 # ======================================================================
 
 sub import {
-  my ($class, @imported_symbols) = @_;
+  my ($class, @import_list) = @_;
   my $calling_pkg = caller(0);
 
-  while (my $symbol = shift @imported_symbols) {
-    $symbol =~ /^(croak|carp|confess|cluck)$/
-      or $class->new->croak("can't import symbol '$symbol'");
+  # find out what the importer wants
+  my ($exports, $options) = $class->parse_import_list(@import_list);
+
+  # default exports
+  keys %$exports
+    or $exports = { map {$_ => {name => $_}}  @{$export_groups{carp}} };
+
+  # if required, apply prefix and suffix
+  if (my $prefix = $options->{prefix}) {
+    substr $exports->{$_}{name}, 0, 0, $prefix foreach keys %$exports;
+  }
+  if (my $suffix = $options->{suffix}) {
+    $exports->{$_}{name} .= $suffix foreach keys %$exports;
+  }
+
+  # export the requested symbols into the caller
+  while (my ($method, $hash) = each %$exports) {
     no strict "refs";
-    *{"$calling_pkg\::co_$symbol"} = sub {
-      my $constructor_args = *{"$calling_pkg\::CARP_OBJECT_ARGS"} // {};
-      $class->new(%$constructor_args)->$symbol(@_);
+    my $export_as = $hash->{as} // $hash->{name};
+    *{"$calling_pkg\::$export_as"} = sub (@) {
+
+      # current value of %CARP_OBJECT_CONSTRUCTOR within the calling package
+      # will be passed to the constructor
+      my $constructor_args = *{"$calling_pkg\::CARP_OBJECT_CONSTRUCTOR"}{HASH} // {};
+
+      # current value of @CARP_NOT within the calling package
+      # will be passed as 'ignore_package' to the Devel::StackTrace constructor
+      if (my $carp_not = *{"$calling_pkg\::CARP_NOT"}{ARRAY}) {
+        $constructor_args->{ignore_package} = $carp_not;
+      }
+
+      # build a one-shot instance and call the requested method
+      $class->new(%$constructor_args)->$method(@_);
     };
+  }
+
+  # if required, reexport (i.e. install an import function into the caller)
+  if ($options->{reexport}) {
+    no strict "refs";
+    not *{"$calling_pkg\::import"}{CODE}
+      or $class->new->croak("use $class -reexport => ... : $calling_pkg already has an import function");
+    *{"$calling_pkg\::import"} = sub {
+      my $further_calling_pkg = caller(0);
+      *{"$further_calling_pkg\::$_"} = *{"$calling_pkg\::$_"}{CODE} foreach keys %$exports;
+    };
+  } 
+
+  # if required, populate %CARP_OBJECT_CONSTRUCTOR within the caller
+  if (my $args = $options->{constructor_args}) {
+    ref $args eq 'HASH'
+      or $class->new->croak("use $class {-constructor_args => ...} : must be a hashref");
+    no strict 'refs';
+    *{"$calling_pkg\::CARP_OBJECT_CONSTRUCTOR"} = $args;
   }
 }
 
 
-  
+sub parse_import_list {
+  my ($class, @import_list) = @_;
 
-  
+  my %exports;
+  my %options;
+  my $last_export;
 
+  # parse import args
+  while (my $arg = shift @import_list) {
 
+    # hashref : options to the exporter
+    if (my $ref = ref $arg) {
+      $ref eq 'HASH' or $class->new->croak("$class->import() cannot handle $ref references");
+      while (my ($k, $v) = each %$arg) {
+        if ($k =~ /^-(prefix|suffix|constructor_args|reexport)$/) {
+          $options{$1} = $v;
+        }
+        elsif ($k eq '-as') {
+          $last_export or $class->new->croak("use $class ... : {-as => ...} must follow the name of a symbol to import");
+          $exports{$last_export}{as} = $v;
+        }
+        else {
+          $class->new->croak("$class->import(): unknown option: '$k'");
+        }
+      }
+    }
+
+    # the 'reexport' option -- different syntax for better readability, i.e. use C:O -reexport => qw/carp croak/;
+    elsif ($arg eq '-reexport') {
+      $options{reexport} = 1;
+    }
+
+    # groups of symbols
+    elsif ($arg =~ /^[:-](\w+)/) {
+      undef $last_export;
+      my $group = $export_groups{$1} or $class->new->croak("use $class qw/:$1/ : group '$1' is not exported");
+      $exports{$_}{name} = $_ foreach @$group;
+    }
+
+    # individual symbols
+    elsif ($arg =~ /^(croak|carp|confess|cluck)$/) {
+      $exports{$arg}{name} = $arg;
+      $last_export = $arg;
+    }
+
+    # something that looks like a regexp -- probably intended for Carp::Clan-like behaviour
+    elsif ($arg =~ /^\^/ or $arg =~ /[|(]/ ) {
+      $options{constructor_args}{clan} = $arg;
+    }
+
+    else {
+      $class->new->croak("use $class '$arg' : this symbol is not exported");
+    }
+
+  }
+  return (\%exports, \%options);
+}
 
 1;
 
@@ -160,197 +239,302 @@ __END__
 
 =head1 NAME
 
-Carp::Object - an object for carping
+Carp::Object - a replacement for Carp or Carp::Clan, object-oriented
 
 =head1 SYNOPSIS
 
+=head2 Object-oriented API
 
+  use Carp::Object ();
   my $carper = Carp::Object->new(%options);
+
+  # warn of error (from the perspective of caller)
   $carper->carp("this is very wrong") if some_bad_condition();
 
+  # die of error (from the perspective of caller)
+  $carper->croak("that's a dead end") if some_deadly_condition();
+  
+  # warn with full stacktrace
+  $carper->cluck("this is very wrong");
+
+  # die with full stacktrace
+  $carper->confess("that's a dead end");
+
+=head2 Functional API
+
+  use Carp::Object qw/:all/;            # many other import options are available, see below
+  our %CARP_OBJECT_CONSTRUCTOR = (...); # optional opportunity to tune the carping behaviour
+  our @CARP_NOT = (...);                # optional opportunity to exclude packages from stack traces
+  
+  # warn of error (from the perspective of caller)
+  carp "this is very wrong" if some_bad_condition();
+  
+  # die of error (from the perspective of caller)
+  croak "that's a dead end" if some_deadly_condition();
+
+  # full stacktrace
+  cluck "this is very wrong";
+  confess "that's a dead end";
+
 
 =head1 DESCRIPTION
 
-Carp
-  - lots of backcompat code
-  - cannot handle exception objects
-  - no support for clans
-  ++ @CARP_NOT can be localized
+This is an object-oriented alternative to L<Carp/croak> or L<Carp::Clan/croak>,
+for reporting errors in modules from the perspective of the caller instead of
+reporting the internal implementation line where the error occurs.
+
+L<Carp/croak> or L<Carp::Clan/croak> were designed long ago, at a time when Perl
+had no support for object-oriented programming; therefore they only
+have a functional API that is not very well suited for extensions.
+The present module attemps to mimic the same behaviour, but
+with an object-oriented implementation that offers more tuning options,
+and also supports errors raised as Exception objects.
+
+Unlike L<Carp> or L<Carp::Clan>, where the presentation of stack frames is hard-coded, 
+here it is delegated to L<Devel::StackFrame>. This means that clients can also
+take advantage of options in L<Devel::StackFrame> to tune the output -- or even replace it by
+another class.
+
+Clients can choose between a new object-oriented API, presented in the next chapter,
+or a traditional functional API compatible with 
+L<Carp/croak> or L<Carp::Clan/croak>, presented in the following chapter.
 
 
-Carp::Clan
-  - regexp must be known statically
-  - cannot handle exception objects
+=head1 METHODS
 
+=head2 new
 
-Advantages
-  - full OO
-  - filtering
-  - customizing frame rendering
-  - show method calls
-  - could display 2, 3, .. n frames
-  - 
+  use Carp::Object (); # '()' to avoid importing any symbols
+  my $carper = Carp::Object->new(%options);
 
+This is the constructor for a "carper" object. Options are :
 
+=over
 
-______________
-package Carp::Trace;
-use strict;
-use Data::Dumper;
-use Devel::Caller::Perl qw[called_args];
+=item verbose
 
-BEGIN {
-    use     vars qw[@ISA @EXPORT $VERSION $DEPTH $OFFSET $ARGUMENTS];
-    use     Exporter;
+if true, a 'croak' method call is treated as a 'confess', and a 'carp' is treated as a 'cluck'.
 
-    @ISA    = 'Exporter';
-    @EXPORT = 'trace';
-}
+=item stacktrace_class
 
-$OFFSET     = 0;
-$DEPTH      = 0;
-$ARGUMENTS  = 0;
-$VERSION    = '0.12';
+The class to be used for inspecting stack traces. Default is L<Devel::StackTrace>.
 
+=item clan
 
-__END__
+The regexp for identifying packages that should be skipped in stack traces, like in L<Carp::Clan>.
+This option internally computes a L</frame_filter> and therefore is incompatible with the
+C<frame_filter> option.
 
-=head1 NAME
+=item display_frame
 
-Carp::Trace - simple traceback of call stacks
+A reference to a subroutine for computing a textual representation of a stack frame.
+The default is L<_default_display_frame>, which is a light wrapper
+on top of L<Devel::StackTrace::Frame/as_string> with improved representation of method calls.
+The given subroutine will be called like in L<Devel::StackTrace::Frame/as_string>, i.e. it
+receives three arguments :
 
-=head1 SYNOPSIS
+=over
 
-    use Carp::Trace;
+=item 1.
 
-    sub flubber {
-        die "You took this route to get here:\n" .
-            trace();
-    }
+a reference to a L<Devel::StackTrace::Frame> instance
 
-=head1 DESCRIPTION
+=item 2.
 
-Carp::Trace provides an easy way to see the route your script took to
-get to a certain place. It uses simple C<caller> calls to determine
-this.
+a boolean flag telling if this is the first stack frame in the list (because
+the display algorithm is usually different for the first stack frame).
 
-=head1 FUNCTIONS
+=item 3.
 
-=head2 trace( [DEPTH, OFFSET, ARGS] )
-
-C<trace> is a function, exported by default, that gives a simple
-traceback of how you got where you are. It returns a formatted string,
-ready to be sent to C<STDOUT> or C<STDERR>.
-
-Optionally, you can provide a DEPTH argument, which tells C<trace> to
-only go back so many levels. The OFFSET argument will tell C<trace> to
-skip the first [OFFSET] layers up.
-
-If you provide a true value for the C<ARGS> parameter, the arguments
-passed to each callstack will be dumped using C<Data::Dumper>.
-This might slow down your trace, but is very useful for debugging.
-
-See also the L<Global Variables> section.
-
-C<trace> is able to tell you the following things:
-
-=over 4
-
-=item *
-
-The name of the function
-
-=item *
-
-The number of callstacks from your current location
-
-=item *
-
-The context in which the function was called
-
-=item *
-
-Whether a new instance of C<@_> was created for this function
-
-=item *
-
-Whether the function was called in an C<eval>, C<require> or C<use>
-
-=item *
-
-If called from a string C<eval>, what the eval-string is
-
-=item *
-
-The file the function is in
-
-=item *
-
-The line number the function is on
+A hashref of optional parameters. Currently there is only one option C<max_arg_length>,
+discribed in L<Devel::StackTrace/as_string(\%p)>.
 
 =back
 
-The output from the following code:
+=item display_frame_param
 
-    use Carp::Trace;
+The optional hashref to be supplied as third parameter to the C<display_frame> subroutine.
 
-    sub foo { bar() };
-    sub bar { $x = baz() };
-    sub baz { @y = zot() };
-    sub zot { print trace() };
 
-    eval 'foo(1)';
+=item ignore_class
 
-Might look something like this:
+an arrayref of classes that will be passed verbatim to L<Devel::StackTrace>; any class
+that belongs to or inherits from that list will be ignored in stack traces.
+C<Carp::Object> will automatically add itself to the list supplied by the client.
 
-    main::(eval) [5]
-        foo(1);
-        void - no new stash
-        x.pl line 1
-    main::foo [4]
-        void - new stash
-        (eval 1) line 1
-    main::bar [3]
-        void - new stash
-        x.pl line 1
-    main::baz [2]
-        scalar - new stash
-        x.pl line 1
-    main::zot [1]
-        list - new stash
-        x.pl line 1
+=back
 
-=head1 Global Variables
+In addition to these options, all options to L<Devel::StackTrace/new> can also be given,
+like for example C<ignore_package>, C<skip_frames>, C<indent>, etc.
 
-=head2 $Carp::Trace::DEPTH
+=head2 croak
 
-Sets the depth to be used by default for C<trace>. Any depth argument
-to C<trace> will override this setting.
+Die of error, from the perspective of the caller.
 
-=head2 $Carp::Trace::OFFSET
+=head2 carp
 
-Sets the offset to be used by default for C<trace>. Any offset
-argument to C<trace> will override this setting.
+Warn of error, from the perspective of the caller.
 
-=head2 $Carp::Trace::ARGUMENTS
+=head2 confess
 
-Sets a flag to indicate that a C<trace> should dump all arguments for
-every call stack it's printing out. Any C<args> argument to C<trace>
-will override this setting.
+Die of error, with full stack backtrace.
+
+=head2 cluck
+
+Warn of error, with full stack backtrace.
+
+=head2 msg
+
+  my $msg = $carper->msg($errstr, $n_frames);
+
+Build the message to be used for dieing or warning.
+C<$errstr> is the initial error message; it may be a plain
+string or an exception object with a stringification method.
+C<$n_frames> is the number of stack frames to display (usually 1); if undefined,
+the whole stack trace is displayed.
+
+=head1 FUNCTIONAL API: THE IMPORT() METHOD
+
+  use Carp::Object;                # no import list => defaults to (':carp');
+  # or
+  use Carp::Object @import_list;
+
+When using this functional API, subroutines equivalent to their corresponding object-oriented
+methods are exported into the caller's symbol table: the caller can then call C<carp>, C<croak>, etc.
+like with the venerable L<Carp> module.
+
+=head2 Import list
+
+The import list accepts the following items :
+
+=over
+
+=item C<carp>, C<croak>, C<confess>, C<cluck>
+
+Individual import of specific routines
+
+=item C<:carp>
+
+Import group equivalent to the list C<carp>, C<croak>, C<confess>.
+
+=item C<:all>
+
+Import group equivalent to the list C<carp>, C<croak>, C<confess>, C<cluck>.
+
+=item C<\%options>
+
+A hashref within the import list is interpreted as a collection of importing options,
+in the spirit of L<Sub::Exporter> or L<Exporter::Tiny>.
+
+Admitted options are :
+
+=over
+
+=item C<-as>
+
+  use Carp::Object carp => {-as => 'complain'}, croak => {-as => 'explode'};
+
+Local name for the last imported function.
+
+=item C<-prefix>
+
+  use Carp::Object qw/carp croak/, {-prefix => 'CO_'};
+  ...
+  CO_croak "aargh";
+
+Names of imported functions will be prefixed by this string.
+
+
+=item C<-prefix>
+
+  use Carp::Object qw/carp croak/, {-suffix => '_CO'};
+  ...
+  croak_CO "ouch";
+
+Names of imported functions will be suffixed by this string.
+
+
+=item C<-constructor_args>
+
+  use Carp::Object qw/carp croak/, {-constructor_args => {indent => 0}};
+
+The given hashref will be passed to L<Carp::Object/new> at each call to an imported function.
+
+=back
+
+=item C<-reexport>
+
+  use Carp::Object -reexport => qw/carp croak/;
+
+Imported symbols will be reexported into the caller of the caller !
+This is useful when a family of modules share a common carping module.
+See L<DBIx::DataModel::Carp> for an example.
+
+=item I<regexp>
+
+  use Carp::Object qw(^(MyClan::|FriendlyOther::));
+
+If the import item "looks like a regexp", it is interpreted as 
+syntactic sugar for C<< use Carp::Object {-constructor_args => {clan => ..}} >>,
+in order to be compatible with the API of L<Carp::Clan>.
+
+The import item "looks like a regexp" if it starts with a C<'^'> character,
+or contains a C<'|'> or a C<'('>.
+
+=back
+
+
+=head2 Global variables
+
+When using the functional API, customization of C<Carp::Object>
+can be done indirectly through global variables in the calling package.
+Such variables can be localized in inner blocks if some specific behaviour
+is needed.
+
+=head3 C<%CARP_OBJECT_CONSTRUCTOR>
+
+  { local %CARP_OBJECT_CONSTRUCTOR = (indent => 0);
+    confess "I'm a great sinner"; # for this call, stack frames will not be indented
+  }
+
+The content of this hash will be passed to L<Carp::Object/new> at each call to an imported function.
+
+
+=head3 C<@CARP_NOT>
+
+The content of this array will be passed as C<ignore_package> argument to
+to L<Carp::Object/new> at each call to an imported function.
+
+=head3 C<$Carp::Verbose>
+
+if true, a 'croak' method call is treated as a 'confess', and a 'carp' is treated as a 'cluck'.
+
+=head1 INTERNAL SUBROUTINES
+
+=head2 _default_display_frame
+
+This is the internal routine for displaying a stack frame.
+
+It calls L<Devel::StackTrace::Frame/as_string> for doing
+most of the work. Then the additional value is to detect
+if this frame "looks like a method call", and if it does,
+rewrite the presentation string to make it look like a method call.
+
+A frame "looks like a method call" if the first argument to the routine
+is a string identical to the class, or reference blessed into that class.
 
 =head1 AUTHOR
 
-This module by
-Jos Boumans E<lt>kane@cpan.orgE<gt>.
+Laurent Dami, E<lt>dami at cpan.orgE<gt>
 
-=head1 COPYRIGHT
+=head1 COPYRIGHT AND LICENSE
 
-This module is
-copyright (c) 2002 Jos Boumans E<lt>kane@cpan.orgE<gt>.
-All rights reserved.
+Copyright 2024 by Laurent Dami.
 
-This library is free software;
-you may redistribute and/or modify it under the same
-terms as Perl itself.
+This library is free software; you can redistribute it and/or modify
+it under the same terms as Perl itself.
 
-=cut
+
+
+
+
