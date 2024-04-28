@@ -466,7 +466,7 @@ Local name for the last imported function.
 Names of imported functions will be prefixed by this string.
 
 
-=item C<-prefix>
+=item C<-suffix>
 
   use Carp::Object qw/carp croak/, {-suffix => '_CO'};
   ...
