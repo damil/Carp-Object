@@ -37,14 +37,18 @@ Carp::Object - a replacement for Carp or Carp::Clan, object-oriented
     cluck "this is very wrong";
     confess "that's a dead end";
 
+    # temporary change some parameters, like for example the "clan" of modules to ignore
+    { local %CARP_OBJECT_CONSTRUCTOR = (clan => qw(^(Foo|Bar)));
+       croak "wrong call to Foo->.. or to Bar->.." if $something_is_wrong; }
+
 # DESCRIPTION
 
 This is an object-oriented alternative to ["croak" in Carp](https://metacpan.org/pod/Carp#croak) or ["croak" in Carp::Clan](https://metacpan.org/pod/Carp%3A%3AClan#croak),
 for reporting errors in modules from the perspective of the caller instead of
 reporting the internal implementation line where the error occurs.
 
-["croak" in Carp](https://metacpan.org/pod/Carp#croak) or ["croak" in Carp::Clan](https://metacpan.org/pod/Carp%3A%3AClan#croak) were designed long ago, at a time when Perl
-had no support for object-oriented programming; therefore they only
+[Carp](https://metacpan.org/pod/Carp) or [Carp::Clan](https://metacpan.org/pod/Carp%3A%3AClan) were designed long ago, at a time when Perl
+had no support yet for object-oriented programming; therefore they only
 have a functional API that is not very well suited for extensions.
 The present module attemps to mimic the same behaviour, but
 with an object-oriented implementation that offers more tuning options,
@@ -55,9 +59,15 @@ here it is delegated to [Devel::StackFrame](https://metacpan.org/pod/Devel%3A%3A
 take advantage of options in [Devel::StackFrame](https://metacpan.org/pod/Devel%3A%3AStackFrame) to tune the output -- or even replace it by
 another class.
 
-Clients can choose between a new object-oriented API, presented in the next chapter,
+Clients can choose between the object-oriented API, presented in the next chapter,
 or a traditional functional API compatible with 
-["croak" in Carp](https://metacpan.org/pod/Carp#croak) or ["croak" in Carp::Clan](https://metacpan.org/pod/Carp%3A%3AClan#croak), presented in the following chapter.
+[Carp](https://metacpan.org/pod/Carp) or [Carp::Clan](https://metacpan.org/pod/Carp%3A%3AClan), presented in the following chapter.
+
+**DISCLAIMER**: this module is very young and not battle-proofed yet.
+Despite many efforts to make it behave as close as possible to the original [Carp](https://metacpan.org/pod/Carp),
+there might be some edge cases where it is not strictly equivalent.
+If you encounter such situations, please open an issue at
+[https://github.com/damil/Carp-Object/issues](https://github.com/damil/Carp-Object/issues).
 
 # METHODS
 
@@ -78,17 +88,16 @@ This is the constructor for a "carper" object. Options are :
 
 - clan
 
-    The regexp for identifying packages that should be skipped in stack traces, like in [Carp::Clan](https://metacpan.org/pod/Carp%3A%3AClan).
-    This option internally computes a ["frame\_filter"](#frame_filter) and therefore is incompatible with the
+    A regexp for identifying packages that should be skipped in stack traces, like in [Carp::Clan](https://metacpan.org/pod/Carp%3A%3AClan).
+    This option internally computes a `frame_filter` and therefore is incompatible with the
     `frame_filter` option.
 
 - display\_frame
 
     A reference to a subroutine for computing a textual representation of a stack frame.
     The default is [\_default\_display\_frame](https://metacpan.org/pod/_default_display_frame), which is a light wrapper
-    on top of ["as\_string" in Devel::StackTrace::Frame](https://metacpan.org/pod/Devel%3A%3AStackTrace%3A%3AFrame#as_string) with improved representation of method calls.
-    The given subroutine will be called like in ["as\_string" in Devel::StackTrace::Frame](https://metacpan.org/pod/Devel%3A%3AStackTrace%3A%3AFrame#as_string), i.e. it
-    receives three arguments :
+    on top of ["as\_string" in Devel::StackTrace::Frame](https://metacpan.org/pod/Devel%3A%3AStackTrace%3A%3AFrame#as_string), with improved representation of method calls.
+    The given subroutine will receive three arguments :
 
     1. a reference to a [Devel::StackTrace::Frame](https://metacpan.org/pod/Devel%3A%3AStackTrace%3A%3AFrame) instance
     2. a boolean flag telling if this is the first stack frame in the list (because
@@ -102,12 +111,12 @@ This is the constructor for a "carper" object. Options are :
 
 - ignore\_class
 
-    an arrayref of classes that will be passed verbatim to [Devel::StackTrace](https://metacpan.org/pod/Devel%3A%3AStackTrace); any class
+    an arrayref of classes that will be passed to [Devel::StackTrace](https://metacpan.org/pod/Devel%3A%3AStackTrace); any class
     that belongs to or inherits from that list will be ignored in stack traces.
     `Carp::Object` will automatically add itself to the list supplied by the client.
 
-In addition to these options, all options to ["new" in Devel::StackTrace](https://metacpan.org/pod/Devel%3A%3AStackTrace#new) can also be given,
-like for example `ignore_package`, `skip_frames`, `indent`, etc.
+In addition to these options, the constructor also accepts all options to ["new" in Devel::StackTrace](https://metacpan.org/pod/Devel%3A%3AStackTrace#new),
+like for example `ignore_package`, `skip_frames`, `frame_filter`, `indent`, etc.
 
 ## croak
 
@@ -149,7 +158,7 @@ like with the venerable [Carp](https://metacpan.org/pod/Carp) module.
 
 The import list accepts the following items :
 
-- `carp`, `croak`, `confess`, `cluck`
+- `carp`, `croak`, `confess` and/or `cluck`
 
     Individual import of specific routines
 
@@ -164,9 +173,7 @@ The import list accepts the following items :
 - `\%options`
 
     A hashref within the import list is interpreted as a collection of importing options,
-    in the spirit of [Sub::Exporter](https://metacpan.org/pod/Sub%3A%3AExporter) or [Exporter::Tiny](https://metacpan.org/pod/Exporter%3A%3ATiny).
-
-    Admitted options are :
+    in the spirit of [Sub::Exporter](https://metacpan.org/pod/Sub%3A%3AExporter) or [Exporter::Tiny](https://metacpan.org/pod/Exporter%3A%3ATiny). Admitted options are :
 
     - `-as`
 
@@ -201,8 +208,9 @@ The import list accepts the following items :
         use Carp::Object -reexport => qw/carp croak/;
 
     Imported symbols will be reexported into the caller of the caller !
-    This is useful when a family of modules share a common carping module.
-    See [DBIx::DataModel::Carp](https://metacpan.org/pod/DBIx%3A%3ADataModel%3A%3ACarp) for an example.
+    This is useful when several modules from a same family share a common carping module.
+    See [DBIx::DataModel::Carp](https://metacpan.org/pod/DBIx%3A%3ADataModel%3A%3ACarp) for an example (actually, this was the initial motivation
+    for working on `Carp::Object`().
 
 - _regexp_
 
@@ -246,9 +254,11 @@ if true, a 'croak' method call is treated as a 'confess', and a 'carp' is treate
 This is the internal routine for displaying a stack frame.
 
 It calls ["as\_string" in Devel::StackTrace::Frame](https://metacpan.org/pod/Devel%3A%3AStackTrace%3A%3AFrame#as_string) for doing
-most of the work. Then the additional value is to detect
-if this frame "looks like a method call", and if it does,
-rewrite the presentation string to make it look like a method call.
+most of the work. An additional feature is that the presentation string
+is rewritten for frames that "look like a method call" :
+instead of `Foobar::method('Foobar=...', @other_args)`, we
+write `Foobar=...->method(@other_args)`, so that method
+calls become apparent within the stack trace.
 
 A frame "looks like a method call" if the first argument to the routine
 is a string identical to the class, or reference blessed into that class.
