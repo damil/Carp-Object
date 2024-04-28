@@ -13,10 +13,10 @@ my $builder = Module::Build->new(
       'utf8'                      => 0,
       'Devel::StackTrace'         => 0,
       'Module::Load'              => 0,
+      'Clone'                     => 0,
      },
     build_requires => {
       'Test::More'                => 0,
-      'Getopt::Long'              => 0,
     },
 
     add_to_cleanup      => [ 'Carp-Object-*' ],

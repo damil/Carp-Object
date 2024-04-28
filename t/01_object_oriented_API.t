@@ -49,7 +49,7 @@ sub croak_msg_like (&$;$) {
 
 sub croak_at_line (&$;$) {
   my ($code, $line, $test_name) = @_;
-  croak_msg_like \&$code, qr/\bline $line$/, $test_name;
+  croak_msg_like \&$code, qr/\bline $line\.$/, $test_name;
   # NOTE : \&$ above : thanks https://stackoverflow.com/questions/54785472/type-of-arg-1-must-be-block-or-sub-not-subroutine-entry
 }
 
