@@ -55,8 +55,8 @@ with an object-oriented implementation that offers more tuning options,
 and also supports errors raised as Exception objects.
 
 Unlike [Carp](https://metacpan.org/pod/Carp) or [Carp::Clan](https://metacpan.org/pod/Carp%3A%3AClan), where the presentation of stack frames is hard-coded, 
-here it is delegated to [Devel::StackFrame](https://metacpan.org/pod/Devel%3A%3AStackFrame). This means that clients can also
-take advantage of options in [Devel::StackFrame](https://metacpan.org/pod/Devel%3A%3AStackFrame) to tune the output -- or even replace it by
+here it is delegated to [Devel::StackTrace](https://metacpan.org/pod/Devel%3A%3AStackTrace). This means that clients can also
+take advantage of options in [Devel::StackTrace](https://metacpan.org/pod/Devel%3A%3AStackTrace) to tune the output -- or even replace it by
 another class.
 
 Clients can choose between the object-oriented API, presented in the next chapter,
