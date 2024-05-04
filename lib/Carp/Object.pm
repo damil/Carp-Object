@@ -7,7 +7,7 @@ use Devel::StackTrace;
 use Module::Load qw/load/;
 use Clone        qw/clone/;
 
-our $VERSION = 1.01;
+our $VERSION = 1.02;
 
 my %export_groups = (carp => [qw/carp croak confess/],
                      all  => [qw/carp croak confess cluck/],  );
