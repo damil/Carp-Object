@@ -304,7 +304,7 @@ reporting the internal implementation line where the error occurs.
 L<Carp> or L<Carp::Clan> were designed long ago, at a time when Perl
 had no support yet for object-oriented programming; therefore they only
 have a functional API that is not very well suited for extensions.
-The present module attemps to mimic the same behaviour, but
+The present module attempts to mimic the same behaviour, but
 with an object-oriented implementation that offers more tuning options,
 and also supports errors raised as Exception objects.
 
